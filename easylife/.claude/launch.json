@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "store-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "../easylife-frontend", "run", "start", "--", "--port", "4200"],
+      "port": 4200
+    }
+  ]
+}

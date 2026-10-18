@@ -1,0 +1,11 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: easylife
+      POSTGRES_USER: easylife
+      POSTGRES_PASSWORD: easylife
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+volumes:
+  pgdata:
