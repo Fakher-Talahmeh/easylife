@@ -79,14 +79,14 @@ class ProductSearchView(APIView):
                 prices__price_list__is_default=True, prices__price_list__is_active=True,
                 prices__price_list__currency__is_base=True,
             )
-            .select_related("product__category", "product__brand").annotate(price=F("prices__price")).order_by("product__name", "sku")
+            .select_related("product__category").annotate(price=F("prices__price")).order_by("product__name", "sku")
         )
         if p.get("barcode"):
             qs = qs.filter(barcode=p["barcode"].strip())
         if p.get("q"):
             for term in p["q"].split():
                 qs = qs.filter(Q(sku__icontains=term) | Q(barcode__icontains=term) | Q(name__icontains=term)
-                               | Q(product__name__icontains=term) | Q(product__brand__name__icontains=term))
+                               | Q(product__name__icontains=term))
         if p.get("category"):
             category = Category.objects.filter(uuid=p["category"]).first()
             qs = qs.filter(product__category_id__in=_descendant_ids(category)) if category else qs.none()
@@ -106,7 +106,7 @@ class ProductSearchView(APIView):
 
         results = [{
             "uuid": str(v.uuid), "sku": v.sku, "barcode": v.barcode, "name": v.name, "product": v.product.name,
-            "brand": v.product.brand.name if v.product.brand_id else "", "category": v.product.category.name if v.product.category_id else None,
+            "category": v.product.category.name if v.product.category_id else None,
             "image": images.get(v.product_id), "price": str(services.money(v.price)), "track_inventory": v.product.track_inventory,
             "available": str(levels.get(v.pk, 0)) if v.product.track_inventory else None,
         } for v in page]

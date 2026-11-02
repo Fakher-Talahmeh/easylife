@@ -1017,6 +1017,15 @@ def _write_persisted_file(path: Path, content: str, force: bool) -> None:
             os.unlink(temp_name)
 
 
+def _safe_child_path(base_dir: Path, *parts: str) -> Path:
+    """Return a path guaranteed to remain below the selected output directory."""
+    base = base_dir.resolve()
+    candidate = (base.joinpath(*parts)).resolve()
+    if candidate != base and base not in candidate.parents:
+        raise ValueError(f"Refusing to write outside output directory: {candidate}")
+    return candidate
+
+
 def persist_design_system(design_system: dict, page: str = None, output_dir: str = None,
                            page_query: str = None, force: bool = False) -> dict:
     """
@@ -1035,17 +1044,20 @@ def persist_design_system(design_system: dict, page: str = None, output_dir: str
         dict with created file paths and status. status is "skipped_exists" if
         MASTER.md already existed and force was not set.
     """
-    base_dir = Path(output_dir) if output_dir else Path.cwd()
+    # The resolved output root is intentionally caller-selectable for this local
+    # tool; every later path is constrained below it by _safe_child_path.
+    # lgtm[py/path-injection]
+    base_dir = (Path(output_dir).expanduser() if output_dir else Path.cwd()).resolve()
 
     # Use project name for project-specific folder. Coalesce falsy values
     # (missing key, explicit None, or "") so the .lower() below can't crash.
     project_name = design_system.get("project_name") or "default"
     project_slug = safe_slug(project_name)
 
-    design_system_dir = base_dir / "design-system" / project_slug
-    pages_dir = design_system_dir / "pages"
+    design_system_dir = _safe_child_path(base_dir, "design-system", project_slug)
+    pages_dir = _safe_child_path(design_system_dir, "pages")
 
-    master_file = design_system_dir / "MASTER.md"
+    master_file = _safe_child_path(design_system_dir, "MASTER.md")
 
     created_files = []
 
@@ -1075,7 +1087,7 @@ def persist_design_system(design_system: dict, page: str = None, output_dir: str
 
     # If page is specified, create page override file with intelligent content
     if page:
-        page_file = pages_dir / f"{safe_slug(page, 'page')}.md"
+        page_file = _safe_child_path(pages_dir, f"{safe_slug(page, 'page')}.md")
         page_content = format_page_override_md(design_system, page, page_query)
         try:
             _write_persisted_file(page_file, page_content, force)

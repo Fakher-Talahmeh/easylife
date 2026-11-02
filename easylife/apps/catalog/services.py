@@ -13,7 +13,7 @@ from apps.core import audit
 from apps.core.exceptions import ServiceError
 
 from .models import (
-    Brand, Category, PriceList, Product, ProductImage, ProductPrice, ProductStatus, ProductVariant,
+    Brand, Category, Offer, OfferType, PriceList, Product, ProductImage, ProductPrice, ProductStatus, ProductVariant,
 )
 
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
@@ -62,6 +62,10 @@ def save_category(*, actor, instance=None, data, request=None):
             if node.pk == instance.pk:
                 raise ServiceError("category_cycle", "A category cannot be its own ancestor.")
             node = node.parent
+    if parent is not None and parent.parent_id is not None:
+        raise ServiceError("category_depth", "A sub-category cannot contain another sub-category.")
+    if instance is not None and parent is not None and instance.children.exists():
+        raise ServiceError("category_depth", "Move this category's sub-categories before making it a sub-category.")
     if instance is None:
         instance = Category(**data)
         instance.slug = unique_slug(Category, data["name"])
@@ -244,6 +248,53 @@ def set_prices(*, actor, variant, rows, request=None):
         )
     audit.log("variant.prices_set", actor=actor, request=request, obj=variant, count=len(rows))
     return variant
+
+
+# ---------------------------------------------------------------- offers
+
+
+def _validate_offer_items(kind, items):
+    if kind == OfferType.PRODUCT_PRICE and (len(items) != 1 or items[0]["quantity"] != 1):
+        raise ServiceError("invalid_offer_items", "A product-price offer needs one product with quantity 1.")
+    if kind == OfferType.QUANTITY_PRICE and (len(items) != 1 or items[0]["quantity"] < 2):
+        raise ServiceError("invalid_offer_items", "A quantity offer needs one product with quantity 2 or more.")
+    if kind == OfferType.BUNDLE and len(items) < 2:
+        raise ServiceError("invalid_offer_items", "A bundle needs at least two products.")
+    if len({row["variant"].pk for row in items}) != len(items):
+        raise ServiceError("duplicate_offer_item", "A product can appear only once in an offer.")
+
+
+@transaction.atomic
+def save_offer(*, actor, data, instance=None, request=None):
+    """Create or replace an offer and its exact item quantities in one transaction."""
+    data = dict(data)
+    items = data.pop("items", None)
+    kind = data.get("type", getattr(instance, "type", None))
+    if items is None:
+        items = [{"variant": row.variant, "quantity": row.quantity} for row in instance.items.all()] if instance else []
+    _validate_offer_items(kind, items)
+    starts = data.get("starts_at", getattr(instance, "starts_at", None))
+    ends = data.get("ends_at", getattr(instance, "ends_at", None))
+    if starts and ends and ends <= starts:
+        raise ServiceError("invalid_offer_dates", "The end must be after the start.", fields={"ends_at": ["Must be after the start."]})
+    if instance is None:
+        instance = Offer.objects.create(**data)
+        action = "offer.created"
+    else:
+        for key, value in data.items():
+            setattr(instance, key, value)
+        instance.save()
+        action = "offer.updated"
+    instance.items.all().delete()
+    instance.items.bulk_create([instance.items.model(offer=instance, **row) for row in items])
+    audit.log(action, actor=actor, request=request, obj=instance, name=instance.name, type=instance.type)
+    return instance
+
+
+@transaction.atomic
+def delete_offer(*, actor, offer, request=None):
+    audit.log("offer.deleted", actor=actor, request=request, obj=offer, name=offer.name)
+    offer.delete()
 
 
 @transaction.atomic

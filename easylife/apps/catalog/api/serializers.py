@@ -3,7 +3,7 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from apps.accounts import rbac
-from apps.catalog.models import Brand, Category, PriceList, Product, ProductImage, ProductPrice, ProductVariant
+from apps.catalog.models import Category, Offer, OfferItem, OfferType, PriceList, Product, ProductImage, ProductPrice, ProductVariant
 from apps.currencies.models import Currency
 
 MONEY = {"max_digits": 18, "decimal_places": 4, "min_value": Decimal("0")}
@@ -26,30 +26,6 @@ class CategorySerializer(serializers.ModelSerializer):
         model = Category
         fields = ["uuid", "name", "name_ar", "name_en", "name_he", "slug", "image", "parent", "sort_order", "is_active"]
         read_only_fields = ["uuid", "slug", "image"]
-
-
-class BrandSerializer(serializers.ModelSerializer):
-    products_count = serializers.IntegerField(read_only=True, default=0)
-    logo = serializers.SerializerMethodField()
-
-    def get_logo(self, brand):
-        if not brand.logo:
-            return None
-        request = self.context.get("request")
-        return request.build_absolute_uri(brand.logo.url) if request else brand.logo.url
-
-    class Meta:
-        model = Brand
-        fields = ["uuid", "name", "name_ar", "name_en", "name_he", "slug", "logo", "is_active", "products_count"]
-        read_only_fields = ["uuid", "slug", "logo"]
-        validators = []  # case-insensitive uniqueness is applied by the service (brand_taken)
-        extra_kwargs = {"name": {"max_length": 120}}
-
-
-class _BrandRef(serializers.ModelSerializer):
-    class Meta:
-        model = Brand
-        fields = ["uuid", "name"]
 
 
 class PriceListSerializer(serializers.ModelSerializer):
@@ -155,14 +131,13 @@ class _CategoryRef(serializers.ModelSerializer):
 
 class ProductListSerializer(serializers.ModelSerializer):
     category = _CategoryRef(read_only=True)
-    brand = _BrandRef(read_only=True)
     variants_count = serializers.SerializerMethodField()
     available = serializers.SerializerMethodField()
     primary_image = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
-        fields = ["uuid", "name", "slug", "category", "brand", "status", "is_visible_on_store",
+        fields = ["uuid", "name", "slug", "category", "status", "is_visible_on_store",
                   "track_inventory", "variants_count", "available", "primary_image", "created_at"]
 
     def get_variants_count(self, p):
@@ -203,15 +178,12 @@ class ProductWriteSerializer(serializers.ModelSerializer):
     category = serializers.SlugRelatedField(
         slug_field="uuid", queryset=Category.objects.all(), allow_null=True, required=False
     )
-    brand = serializers.SlugRelatedField(
-        slug_field="uuid", queryset=Brand.objects.all(), allow_null=True, required=False
-    )
     variants = VariantWriteSerializer(many=True, required=False, write_only=True)
 
     class Meta:
         model = Product
         fields = ["name", "name_ar", "name_en", "name_he", "description", "description_ar", "description_en",
-                  "description_he", "category", "brand", "track_inventory", "variants"]
+                  "description_he", "category", "track_inventory", "variants"]
         extra_kwargs = {"name": {"max_length": 200}}
 
 
@@ -223,3 +195,61 @@ class ProductImportSerializer(serializers.Serializer):
 class BulkSerializer(serializers.Serializer):
     ids = serializers.ListField(child=serializers.UUIDField(), min_length=1, max_length=200)
     action = serializers.ChoiceField(choices=["show", "hide", "archive"])
+
+
+class OfferItemWriteSerializer(serializers.Serializer):
+    variant = serializers.SlugRelatedField(slug_field="uuid", queryset=ProductVariant.objects.filter(
+        deleted_at__isnull=True, product__deleted_at__isnull=True, is_active=True))
+    quantity = serializers.IntegerField(min_value=1, max_value=999)
+
+
+class OfferItemSerializer(serializers.ModelSerializer):
+    variant = serializers.SlugRelatedField(slug_field="uuid", read_only=True)
+    sku = serializers.CharField(source="variant.sku", read_only=True)
+    product_name = serializers.CharField(source="variant.product.name", read_only=True)
+    variant_name = serializers.CharField(source="variant.name", read_only=True)
+
+    class Meta:
+        model = OfferItem
+        fields = ["variant", "sku", "product_name", "variant_name", "quantity"]
+
+
+class OfferSerializer(serializers.ModelSerializer):
+    price_list = serializers.SlugRelatedField(slug_field="uuid", queryset=PriceList.objects.filter(is_active=True))
+    price_list_name = serializers.CharField(source="price_list.name", read_only=True)
+    currency = serializers.CharField(source="price_list.currency.code", read_only=True)
+    items = OfferItemWriteSerializer(many=True, write_only=True)
+    item_details = OfferItemSerializer(source="items", many=True, read_only=True)
+
+    class Meta:
+        model = Offer
+        fields = ["uuid", "name", "name_ar", "name_en", "name_he", "type", "price_list", "price_list_name",
+                  "currency", "fixed_price", "starts_at", "ends_at", "is_active", "items", "item_details",
+                  "created_at"]
+        read_only_fields = ["uuid", "price_list_name", "currency", "item_details", "created_at"]
+
+    def validate(self, attrs):
+        kind = attrs.get("type", getattr(self.instance, "type", None))
+        starts = attrs.get("starts_at", getattr(self.instance, "starts_at", None))
+        ends = attrs.get("ends_at", getattr(self.instance, "ends_at", None))
+        items = attrs.get("items")
+        if starts and ends and ends <= starts:
+            raise serializers.ValidationError({"ends_at": ["The end must be after the start."]})
+        if items is not None:
+            if len({row["variant"].pk for row in items}) != len(items):
+                raise serializers.ValidationError({"items": ["A product can appear only once in an offer."]})
+            if kind == OfferType.PRODUCT_PRICE and (len(items) != 1 or items[0]["quantity"] != 1):
+                raise serializers.ValidationError({"items": ["A product-price offer needs one product with quantity 1."]})
+            if kind == OfferType.QUANTITY_PRICE and (len(items) != 1 or items[0]["quantity"] < 2):
+                raise serializers.ValidationError({"items": ["A quantity offer needs one product with quantity 2 or more."]})
+            if kind == OfferType.BUNDLE and len(items) < 2:
+                raise serializers.ValidationError({"items": ["A bundle needs at least two products."]})
+        return attrs
+
+
+class OfferVariantSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True)
+
+    class Meta:
+        model = ProductVariant
+        fields = ["uuid", "sku", "name", "product_name"]

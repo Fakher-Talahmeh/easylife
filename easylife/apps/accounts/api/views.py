@@ -13,7 +13,7 @@ from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.exceptions import TokenError
 
 from apps.accounts import rbac, services
-from apps.accounts.models import Role, User, UserType
+from apps.accounts.models import NewsletterSubscription, Role, User, UserType
 from apps.accounts.rbac import HasPermission
 
 from . import serializers as s
@@ -94,6 +94,98 @@ class MeView(APIView):
         ser.is_valid(raise_exception=True)
         ser.save()
         return Response(ser.data)
+
+
+class NewsletterPreferenceView(APIView):
+    """A customer controls explicit consent for promotional WhatsApp messages."""
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        if request.user.user_type != UserType.CUSTOMER:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("Only customer accounts can subscribe to the newsletter.")
+
+    def get(self, request):
+        subscription = NewsletterSubscription.objects.filter(user=request.user).first()
+        return Response({
+            "subscribed": bool(subscription and subscription.unsubscribed_at is None),
+            "subscribed_at": subscription.subscribed_at if subscription else None,
+        })
+
+    def patch(self, request):
+        ser = s.NewsletterPreferenceSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        subscription, _ = NewsletterSubscription.objects.get_or_create(user=request.user)
+        if ser.validated_data["subscribed"]:
+            subscription.unsubscribed_at = None
+        else:
+            from django.utils import timezone
+            subscription.unsubscribed_at = timezone.now()
+        subscription.save(update_fields=["unsubscribed_at"])
+        return self.get(request)
+
+
+class NewsletterAdminView(APIView):
+    permission_classes = [HasPermission]
+    # Sending is the sensitive action; the same permission gates the page's count and send endpoint.
+    required_permission = "marketing.send_newsletter"
+
+    def get(self, request):
+        count = NewsletterSubscription.objects.filter(
+            user__user_type=UserType.CUSTOMER,
+            user__is_active=True,
+            unsubscribed_at__isnull=True,
+        ).count()
+        return Response({"subscriber_count": count})
+
+    def post(self, request):
+        ser = s.NewsletterSendSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        recipients = NewsletterSubscription.objects.filter(
+            user__user_type=UserType.CUSTOMER,
+            user__is_active=True,
+            unsubscribed_at__isnull=True,
+        ).select_related("user").order_by("user_id")
+        from apps.accounts.whatsapp import WhatsAppDeliveryError, send_images_batch, send_text
+        image = ser.validated_data.get("image")
+        sent = failed = 0
+        for subscription in recipients.iterator():
+            try:
+                if image:
+                    send_images_batch(
+                        subscription.user.phone,
+                        [{**image, "caption": ser.validated_data["message"]}],
+                        caption=ser.validated_data["message"],
+                    )
+                else:
+                    send_text(subscription.user.phone, ser.validated_data["message"])
+            except WhatsAppDeliveryError:
+                failed += 1
+            else:
+                sent += 1
+        return Response({"subscriber_count": sent + failed, "sent": sent, "failed": failed})
+
+
+class NewsletterAdminSubscribeView(APIView):
+    """Admin opts an existing customer into the newsletter (consent collected outside the app)."""
+
+    permission_classes = [HasPermission]
+    required_permission = "marketing.send_newsletter"
+
+    def post(self, request):
+        ser = s.NewsletterSubscribeUserSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        user = get_object_or_404(
+            User, uuid=ser.validated_data["user"], user_type=UserType.CUSTOMER, is_active=True
+        )
+        subscription, created = NewsletterSubscription.objects.get_or_create(user=user)
+        if subscription.unsubscribed_at is not None:
+            subscription.unsubscribed_at = None
+            subscription.save(update_fields=["unsubscribed_at"])
+        return Response(
+            {"user": str(user.uuid), "subscribed": True, "subscribed_at": subscription.subscribed_at},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
 
 
 # ------------------------------------------------------------------ admin: staff

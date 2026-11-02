@@ -162,3 +162,18 @@ class WhatsAppCode(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=["phone", "-created_at"])]
+
+
+class NewsletterSubscription(models.Model):
+    """Explicit WhatsApp newsletter consent for a customer account."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="newsletter_subscription",
+    )
+    subscribed_at = models.DateTimeField(auto_now_add=True)
+    unsubscribed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["unsubscribed_at", "-subscribed_at"])]

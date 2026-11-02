@@ -19,6 +19,7 @@ DEBUG = env("DEBUG")
 ALLOWED_HOSTS = env("ALLOWED_HOSTS")
 
 INSTALLED_APPS = [
+    "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
@@ -84,6 +85,7 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 MAX_UPLOAD_IMAGE_BYTES = 5 * 1024 * 1024
@@ -137,10 +139,14 @@ SPECTACULAR_SETTINGS = {
 CORS_ALLOWED_ORIGINS = env("CORS_ALLOWED_ORIGINS")
 
 # ---- WhatsApp OTP (docs/06-security.md) ----
-# Backend: "eksir" (real API) | "console" (prints the code, dev only) | "locmem" (tests)
+# Backend: "eksir" (real API) | "console" (no-op, dev only) | "locmem" (tests)
 WHATSAPP_BACKEND = env("WHATSAPP_BACKEND", default="eksir")
 WHATSAPP_API_URL = env(
     "WHATSAPP_API_URL", default="https://bmplat.eksir.co/accounts/api/whatsapp/send-text"
+)
+WHATSAPP_IMAGES_API_URL = env(
+    "WHATSAPP_IMAGES_API_URL",
+    default="https://zaply.eksir.co/accounts/api/whatsapp/send-images-batch",
 )
 WHATSAPP_API_KEY = env("WHATSAPP_API_KEY", default="")  # secret: .env only, never in code
 WHATSAPP_TIMEOUT_SECONDS = 10

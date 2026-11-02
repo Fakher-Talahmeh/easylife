@@ -165,3 +165,48 @@ class ProductPrice(TimeStampedModel):
             models.UniqueConstraint(fields=["variant", "price_list"], name="uniq_price_per_list"),
             models.CheckConstraint(condition=Q(price__gte=0), name="price_non_negative"),
         ]
+
+
+class OfferType(models.TextChoices):
+    PRODUCT_PRICE = "product_price", "Product price"
+    QUANTITY_PRICE = "quantity_price", "Quantity price"
+    BUNDLE = "bundle", "Bundle"
+
+
+class Offer(UUIDModel, TimeStampedModel):
+    """A scheduled, fixed-price storefront offer.
+
+    PRODUCT_PRICE prices one variant; QUANTITY_PRICE prices a number of one variant; BUNDLE prices a group of variants.
+    The line quantities live in OfferItem so every kind shares the same auditable shape.
+    """
+
+    name = models.CharField(max_length=160)
+    name_ar = models.CharField(max_length=160, blank=True)
+    name_en = models.CharField(max_length=160, blank=True)
+    name_he = models.CharField(max_length=160, blank=True)
+    type = models.CharField(max_length=20, choices=OfferType.choices)
+    price_list = models.ForeignKey(PriceList, on_delete=models.PROTECT, related_name="offers")
+    fixed_price = models.DecimalField(max_digits=18, decimal_places=4)
+    starts_at = models.DateTimeField(null=True, blank=True)
+    ends_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [models.CheckConstraint(condition=Q(fixed_price__gte=0), name="offer_price_non_negative")]
+
+    def __str__(self):
+        return self.name
+
+
+class OfferItem(TimeStampedModel):
+    offer = models.ForeignKey(Offer, on_delete=models.CASCADE, related_name="items")
+    variant = models.ForeignKey(ProductVariant, on_delete=models.PROTECT, related_name="offer_items")
+    quantity = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            models.UniqueConstraint(fields=["offer", "variant"], name="uniq_offer_variant"),
+            models.CheckConstraint(condition=Q(quantity__gt=0), name="offer_item_quantity_positive"),
+        ]

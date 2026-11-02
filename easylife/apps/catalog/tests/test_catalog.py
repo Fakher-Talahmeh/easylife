@@ -5,7 +5,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from PIL import Image
 
-from apps.catalog.models import Brand, Category, PriceList, Product, ProductImage, ProductVariant
+from apps.catalog.models import Category, PriceList, Product, ProductImage, ProductVariant
 from apps.catalog.tests.helpers import price_list, product, warehouse
 from apps.core.models import AuditLog
 from apps.core.testing import bootstrap, client_for, make_admin, make_customer, make_staff
@@ -39,7 +39,7 @@ def png(size=(4, 4), fmt="PNG", name="a.png"):
 
 def new_product_payload(pl, **extra):
     return {
-        "name": "Blue Shirt", "description": "Cotton", "brand": str(Brand.objects.get_or_create(name="Acme")[0].uuid),
+        "name": "Blue Shirt", "description": "Cotton",
         "variants": [
             {"sku": "SH-BL-L", "name": "Blue / L", "attributes": {"color": "blue", "size": "L"},
              "reorder_level": "5", "prices": [{"price_list": str(pl.uuid), "price": "25.00"}]},
@@ -84,6 +84,52 @@ def test_cost_price_is_hidden_without_view_cost(admin, pl):
     assert plain.get(f"{B}products/{uuid}/").data["variants"][0]["cost_price"] is None
     costly = client_for(make_staff(["products.view", "inventory.view_cost"]))
     assert costly.get(f"{B}products/{uuid}/").data["variants"][0]["cost_price"] == "0.0000"
+
+
+# ------------------------------------------------------------ offers
+
+def test_offer_management_and_public_rules(admin, pl):
+    first, second = product("Paper cups", price=10), product("Glass cups", price=8)
+    v1, v2 = first.test_variants[0], second.test_variants[0]
+    body = {
+        "name": "Cups bundle", "type": "bundle", "price_list": str(pl.uuid), "fixed_price": "15",
+        "is_active": True, "items": [{"variant": str(v1.uuid), "quantity": 1}, {"variant": str(v2.uuid), "quantity": 2}],
+    }
+    created = admin.post(B + "offers/", body, format="json")
+    assert created.status_code == 201, created.data
+    assert created.data["currency"] == "ILS" and len(created.data["item_details"]) == 2
+    assert admin.get(B + "offers/").status_code == 200
+    public = client_for(make_customer()).get("/api/v1/store/offers/")
+    assert public.status_code == 200 and public.data[0]["type"] == "bundle"
+    assert admin.patch(f"{B}offers/{created.data['uuid']}/", {"is_active": False}, format="json").status_code == 200
+    assert client_for(make_customer()).get("/api/v1/store/offers/").data == []
+
+
+def test_offer_shape_and_permissions(pl):
+    p = product(price=10)
+    viewer = client_for(make_staff(["products.view"]))
+    assert viewer.get(B + "offers/").status_code == 200
+    bad = viewer.post(B + "offers/", {
+        "name": "Bad quantity", "type": "quantity_price", "price_list": str(pl.uuid), "fixed_price": "5",
+        "items": [{"variant": str(p.test_variants[0].uuid), "quantity": 1}],
+    }, format="json")
+    assert bad.status_code == 403
+    manager = client_for(make_staff(["products.manage_prices"]))
+    bad = manager.post(B + "offers/", {
+        "name": "Bad quantity", "type": "quantity_price", "price_list": str(pl.uuid), "fixed_price": "5",
+        "items": [{"variant": str(p.test_variants[0].uuid), "quantity": 1}],
+    }, format="json")
+    assert bad.status_code == 400
+
+
+def test_offer_variant_search_returns_the_nearest_ten():
+    for number in range(12):
+        product(name=f"Searchable cups {number}", sku=f"SEARCH-{number}")
+    viewer = client_for(make_staff(["products.view"]))
+    response = viewer.get(B + "offers/variants/?search=Searchable cups")
+    assert response.status_code == 200
+    assert len(response.data) == 10
+    assert all("Searchable cups" in item["product_name"] for item in response.data)
 
 
 def test_sku_and_barcode_must_be_unique_case_insensitively(admin, pl):
@@ -163,7 +209,7 @@ def test_bulk_actions(admin):
 
 def test_update_product_and_name_changes_slug(admin):
     p = product(name="Old Name")
-    r = admin.patch(f"{B}products/{p.uuid}/", {"name": "New Name", "brand": str(Brand.objects.create(name="B").uuid), "status": "archived",
+    r = admin.patch(f"{B}products/{p.uuid}/", {"name": "New Name", "status": "archived",
                                                "is_visible_on_store": True}, format="json")
     assert r.status_code == 200 and r.data["name"] == "New Name" and r.data["slug"] == "new-name"
     assert r.data["status"] == "active"  # status / visibility are NOT writable here
@@ -309,6 +355,9 @@ def test_categories(admin):
     assert root.status_code == 201 and root.data["slug"] == "men"
     child = admin.post(B + "categories/", {"name": "Shirts", "parent": root.data["uuid"]}, format="json")
     assert str(child.data["parent"]) == str(root.data["uuid"])
+    # only two levels are allowed: a sub-category cannot have children
+    grandchild = admin.post(B + "categories/", {"name": "T-shirts", "parent": child.data["uuid"]}, format="json")
+    assert grandchild.status_code == 400 and grandchild.data["code"] == "category_depth"
     # cycle: root under its own child
     r = admin.patch(f"{B}categories/{root.data['uuid']}/", {"parent": child.data["uuid"]}, format="json")
     assert r.status_code == 400 and r.data["code"] == "category_cycle"
@@ -361,53 +410,6 @@ def _gif_bytes():
     return buf.getvalue()
 
 
-# ------------------------------------------------------------ brands
-
-
-def test_brand_crud_case_insensitive_unique_and_delete_rules(admin):
-    r = admin.post(B + "brands/", {"name": "  Acme  "}, format="json")
-    assert r.status_code == 201 and r.json()["name"] == "Acme" and r.json()["products_count"] == 0
-    dup = admin.post(B + "brands/", {"name": "ACME"}, format="json")
-    assert dup.status_code == 400 and dup.json()["code"] == "brand_taken"
-    uuid = r.json()["uuid"]
-    assert admin.patch(f"{B}brands/{uuid}/", {"name": "Acme Co"}, format="json").json()["name"] == "Acme Co"
-    other = admin.post(B + "brands/", {"name": "Zed"}, format="json").json()
-    assert admin.patch(f"{B}brands/{other['uuid']}/", {"name": "acme co"}, format="json").json()["code"] == "brand_taken"
-    # a brand keeps its own name when saved again (not "taken" by itself)
-    assert admin.patch(f"{B}brands/{uuid}/", {"name": "Acme Co", "is_active": False}, format="json").status_code == 200
-
-    p = product("Soap")
-    assert admin.patch(f"{B}products/{p.uuid}/", {"brand": uuid}, format="json").json()["brand"] == {"uuid": uuid, "name": "Acme Co"}
-    assert admin.get(B + "brands/").json()[0]["products_count"] == 1
-    blocked = admin.delete(f"{B}brands/{uuid}/")
-    assert blocked.status_code == 400 and blocked.json()["code"] == "brand_in_use"
-    assert admin.patch(f"{B}products/{p.uuid}/", {"brand": None}, format="json").json()["brand"] is None
-    assert admin.delete(f"{B}brands/{uuid}/").status_code == 204
-    assert Brand.objects.filter(name="Acme Co").count() == 0
-
-
-def test_brand_list_search_filter_and_product_search_by_brand(admin):
-    acme = Brand.objects.create(name="Acme")
-    Brand.objects.create(name="Beta", is_active=False)
-    product("Anvil", brand=acme)
-    product("Plain")
-    assert [b["name"] for b in admin.get(B + "brands/").json()] == ["Acme", "Beta"]
-    assert [b["name"] for b in admin.get(B + "brands/?search=bet").json()] == ["Beta"]
-    assert [b["name"] for b in admin.get(B + "brands/?active=true").json()] == ["Acme"]
-    found = admin.get(B + "products/?search=acme").json()["results"]
-    assert [p["name"] for p in found] == ["Anvil"] and found[0]["brand"]["name"] == "Acme"
-
-
-def test_brand_permissions(admin):
-    assert client_for(make_customer()).get(B + "brands/").status_code == 403
-    assert client_for(make_staff()).get(B + "brands/").status_code == 403
-    viewer = client_for(make_staff(["brands.view"]))
-    assert viewer.get(B + "brands/").status_code == 200
-    assert viewer.post(B + "brands/", {"name": "X"}, format="json").status_code == 403
-    assert client_for(make_staff(["brands.manage"])).post(B + "brands/", {"name": "X"}, format="json").status_code == 201
-    assert client_for(make_staff(roles=["store_manager"])).post(B + "brands/", {"name": "Y"}, format="json").status_code == 201
-
-
 # ------------------------------------------------------------ manual cost entry
 
 
@@ -449,70 +451,6 @@ def test_cost_needs_its_own_permission(admin, pl):
     # starter roles never include it
     assert client_for(make_staff(roles=["store_manager"])).patch(
         f"{B}variants/{var.uuid}/", {"cost_price": "3"}, format="json").status_code == 403
-
-
-# ------------------------------------------------------------ brand logo
-def test_brand_logo_upload_replace_remove_and_storefront(admin, settings):
-    from rest_framework.test import APIClient
-    import os
-
-    from apps.catalog.tests.helpers import product as make_product
-
-    brand = Brand.objects.create(name="Acme")
-    make_product("Soap", price=5, brand=brand, stock=3)
-    url = f"{B}brands/{brand.uuid}/logo/"
-    assert admin.get(f"{B}brands/{brand.uuid}/").data["logo"] is None
-    store = APIClient()
-    assert store.get("/api/v1/store/brands/").data[0]["logo"] is None
-
-    r = admin.post(url, {"image": png(name="x.png")}, format="multipart")
-    assert r.status_code == 200 and r.data["logo"].startswith("http") and "/brands/acme-" in r.data["logo"]
-    assert r.data["logo"].endswith(".webp")
-    first = Brand.objects.get(pk=brand.pk).logo.path
-    assert os.path.exists(first)
-    assert store.get("/api/v1/store/brands/").data[0]["logo"] == r.data["logo"]  # customers see it
-
-    r2 = admin.post(url, {"image": png(name="y.png")}, format="multipart")  # replace: the old file is gone
-    assert r2.status_code == 200 and not os.path.exists(first)
-
-    assert admin.delete(url).status_code == 204
-    assert Brand.objects.get(pk=brand.pk).logo.name in ("", None)
-    assert store.get("/api/v1/store/brands/").data[0]["logo"] is None
-    assert admin.delete(url).status_code == 204  # idempotent
-
-
-def test_brand_logo_rejects_bad_files_and_needs_permission(admin):
-    from apps.core.testing import make_staff
-
-    brand = Brand.objects.create(name="Acme")
-    url = f"{B}brands/{brand.uuid}/logo/"
-    fake = SimpleUploadedFile("evil.png", b"<script>alert(1)</script>", content_type="image/png")
-    assert admin.post(url, {"image": fake}, format="multipart").status_code == 400
-    gif = SimpleUploadedFile("a.gif", _gif_bytes(), content_type="image/gif")
-    assert admin.post(url, {"image": gif}, format="multipart").data["code"] == "invalid_image"
-    assert admin.post(url, {}, format="multipart").status_code == 400
-    viewer = client_for(make_staff(perms=["brands.view"]))
-    assert viewer.post(url, {"image": png()}, format="multipart").status_code == 403
-    assert viewer.delete(url).status_code == 403
-    assert client_for(make_staff(perms=["brands.manage"])).post(url, {"image": png()}, format="multipart").status_code == 200
-
-
-def test_brand_logos_are_stored_on_one_3_2_canvas_without_cropping_or_stretching(admin):
-    from PIL import Image as PILImage
-
-    brand = Brand.objects.create(name="Acme")
-    url = f"{B}brands/{brand.uuid}/logo/"
-    for size, expected in (((400, 100), (400, 267)), ((100, 400), (600, 400)), ((300, 200), (300, 200)), ((2000, 2000), (960, 640))):
-        r = admin.post(url, {"image": png(size=size, name="l.png")}, format="multipart")
-        assert r.status_code == 200
-        with PILImage.open(Brand.objects.get(pk=brand.pk).logo.path) as stored:
-            assert stored.size == expected, (size, stored.size)
-            assert stored.format == "WEBP"
-            assert stored.mode == "RGBA" or size == (300, 200)  # padded canvases keep their transparency
-    # the original picture sits in the middle, the rest of the canvas is transparent
-    r = admin.post(url, {"image": png(size=(300, 100), name="wide.png")}, format="multipart")
-    with PILImage.open(Brand.objects.get(pk=brand.pk).logo.path) as stored:
-        assert stored.getpixel((0, 0))[3] == 0 and stored.getpixel((150, stored.height // 2))[3] == 255
 
 
 # ------------------------------------------------------------ category image
@@ -564,18 +502,17 @@ def test_every_uploaded_picture_is_stored_as_webp(admin):
     from PIL import Image as PILImage
 
     cat = Category.objects.create(name="Cleaning", slug="cleaning")
-    brand = Brand.objects.create(name="Acme")
-    # a transparent PNG and a JPEG go in, WebP comes out (transparency kept)
+    p = product()
+    # Transparent PNG and JPEG uploads are normalized to WebP (transparency kept).
     buf = io.BytesIO()
     PILImage.new("RGBA", (40, 20), (255, 0, 0, 0)).save(buf, "PNG")
-    transparent = SimpleUploadedFile("logo.png", buf.getvalue(), content_type="image/png")
-    r = admin.post(f"{B}brands/{brand.uuid}/logo/", {"image": transparent}, format="multipart")
-    assert r.status_code == 200 and r.data["logo"].endswith(".webp")
-    with PILImage.open(Brand.objects.get(pk=brand.pk).logo.path) as stored:
+    transparent = SimpleUploadedFile("product.png", buf.getvalue(), content_type="image/png")
+    r = admin.post(f"{B}products/{p.uuid}/images/", {"image": transparent}, format="multipart")
+    assert r.status_code == 201 and r.data["url"].endswith(".webp")
+    with PILImage.open(ProductImage.objects.get(pk=r.data["id"]).image.path) as stored:
         assert stored.format == "WEBP" and stored.mode == "RGBA" and stored.getpixel((0, 0))[3] == 0
     r = admin.post(f"{B}categories/{cat.uuid}/image/", {"image": png(fmt="JPEG", name="c.jpg")}, format="multipart")
     assert r.data["image"].endswith(".webp")
-    p = product()
     r = admin.post(f"{B}products/{p.uuid}/images/", {"image": png(fmt="JPEG", name="p.jpg")}, format="multipart")
     assert r.data["url"].endswith(".webp")
     with PILImage.open(ProductImage.objects.get(pk=r.data["id"]).image.path) as stored:

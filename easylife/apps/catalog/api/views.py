@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, Exists, F, OuterRef, Prefetch, Q, Sum, Value
+from django.db.models import Case, Count, DecimalField, Exists, F, IntegerField, OuterRef, Prefetch, Q, Sum, Value, When
 from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -13,7 +13,7 @@ from apps.accounts import rbac
 from apps.accounts.rbac import HasPermission
 from apps.catalog import import_products, services
 from apps.catalog.import_template import build_template
-from apps.catalog.models import Brand, Category, PriceList, Product, ProductImage, ProductVariant
+from apps.catalog.models import Category, Offer, PriceList, Product, ProductImage, ProductVariant
 from apps.core.exceptions import ServiceError
 
 from . import serializers as s
@@ -70,62 +70,6 @@ class CategoryViewSet(
         return Response(self.get_serializer(category).data)
 
 
-class BrandViewSet(
-    mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
-    mixins.UpdateModelMixin, mixins.DestroyModelMixin, viewsets.GenericViewSet,
-):
-    permission_classes = [HasPermission]
-    serializer_class = s.BrandSerializer
-    lookup_field = "uuid"
-    http_method_names = PATCH_ONLY
-    pagination_class = None
-    required_permission = {
-        "list": "brands.view", "retrieve": "brands.view", "create": "brands.manage",
-        "partial_update": "brands.manage", "destroy": "brands.manage", "logo": "brands.manage",
-    }
-
-    def get_queryset(self):
-        qs = Brand.objects.annotate(
-            products_count=Count("products", filter=Q(products__deleted_at__isnull=True))).order_by("name")
-        p = self.request.query_params
-        if p.get("search"):
-            qs = qs.filter(name__icontains=p["search"].strip())
-        if p.get("active") not in (None, ""):
-            qs = qs.filter(is_active=_truthy(p["active"]))
-        return qs
-
-    def _fresh(self, obj):
-        return self.get_serializer(self.get_queryset().get(pk=obj.pk)).data
-
-    def create(self, request, *args, **kwargs):
-        ser = self.get_serializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        obj = services.save_brand(actor=request.user, data=ser.validated_data, request=request)
-        return Response(self._fresh(obj), status=status.HTTP_201_CREATED)
-
-    def partial_update(self, request, *args, **kwargs):
-        ser = self.get_serializer(self.get_object(), data=request.data, partial=True)
-        ser.is_valid(raise_exception=True)
-        obj = services.save_brand(actor=request.user, instance=ser.instance, data=ser.validated_data, request=request)
-        return Response(self._fresh(obj))
-
-    def destroy(self, request, *args, **kwargs):
-        services.delete_brand(actor=request.user, brand=self.get_object(), request=request)
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-    @action(detail=True, methods=["post", "delete"], parser_classes=[MultiPartParser, FormParser])
-    def logo(self, request, uuid=None):
-        """POST uploads/replaces the brand picture (multipart `image`); DELETE removes it."""
-        brand = self.get_object()
-        if request.method == "DELETE":
-            services.remove_brand_logo(actor=request.user, brand=brand, request=request)
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        ser = s.SingleImageSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        services.set_brand_logo(actor=request.user, brand=brand, file=ser.validated_data["image"], request=request)
-        return Response(self._fresh(brand))
-
-
 class PriceListViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
     mixins.UpdateModelMixin, viewsets.GenericViewSet,
@@ -152,6 +96,59 @@ class PriceListViewSet(
         ser.is_valid(raise_exception=True)
         obj = services.save_price_list(actor=request.user, instance=ser.instance, data=ser.validated_data, request=request)
         return Response(self.get_serializer(obj).data)
+
+
+class OfferViewSet(
+    mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
+    mixins.UpdateModelMixin, mixins.DestroyModelMixin, viewsets.GenericViewSet,
+):
+    """Back-office offers. The service owns the cross-field/item rules."""
+
+    permission_classes = [HasPermission]
+    serializer_class = s.OfferSerializer
+    queryset = Offer.objects.select_related("price_list__currency").prefetch_related("items__variant__product")
+    lookup_field = "uuid"
+    http_method_names = PATCH_ONLY
+    # The management screen loads all offers at once and expects the same simple array shape as price lists.
+    pagination_class = None
+    required_permission = {
+        "list": "products.view", "retrieve": "products.view", "variants": "products.view",
+        "create": "products.manage_prices", "partial_update": "products.manage_prices", "destroy": "products.manage_prices",
+    }
+
+    def create(self, request, *args, **kwargs):
+        ser = self.get_serializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        offer = services.save_offer(actor=request.user, data=ser.validated_data, request=request)
+        return Response(self.get_serializer(self.get_queryset().get(pk=offer.pk)).data, status=status.HTTP_201_CREATED)
+
+    def partial_update(self, request, *args, **kwargs):
+        ser = self.get_serializer(self.get_object(), data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        offer = services.save_offer(actor=request.user, instance=ser.instance, data=ser.validated_data, request=request)
+        return Response(self.get_serializer(self.get_queryset().get(pk=offer.pk)).data)
+
+    def destroy(self, request, *args, **kwargs):
+        services.delete_offer(actor=request.user, offer=self.get_object(), request=request)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=False, methods=["get"], pagination_class=None)
+    def variants(self, request):
+        term = (request.query_params.get("search") or "").strip()
+        variants = ProductVariant.objects.filter(
+            deleted_at__isnull=True, is_active=True, product__deleted_at__isnull=True,
+        ).select_related("product")
+        if not term:
+            return Response([])
+        variants = variants.filter(Q(product__name__icontains=term) | Q(name__icontains=term) | Q(sku__icontains=term)).annotate(
+            match_rank=Case(
+                When(product__name__istartswith=term, then=Value(0)),
+                When(name__istartswith=term, then=Value(1)),
+                When(sku__istartswith=term, then=Value(2)),
+                default=Value(3), output_field=IntegerField(),
+            )
+        ).order_by("match_rank", "product__name", "sku")[:10]
+        return Response(s.OfferVariantSerializer(variants, many=True).data)
 
 
 def _truthy(value):
@@ -181,7 +178,7 @@ class ProductViewSet(
             "prices__price_list__currency")
         qs = (
             Product.objects.filter(deleted_at__isnull=True)
-            .select_related("category", "brand")
+            .select_related("category")
             .prefetch_related(Prefetch("variants", queryset=live_variants), "images")
             .annotate(available=Coalesce(
                 Sum(F("variants__stock_levels__on_hand") - F("variants__stock_levels__reserved"),
@@ -202,7 +199,7 @@ class ProductViewSet(
             term = p["search"].strip()
             matching = ProductVariant.objects.filter(product=OuterRef("pk"), deleted_at__isnull=True).filter(
                 Q(sku__icontains=term) | Q(barcode__icontains=term))
-            qs = qs.filter(Q(name__icontains=term) | Q(brand__name__icontains=term) | Exists(matching))
+            qs = qs.filter(Q(name__icontains=term) | Exists(matching))
         if _truthy(p.get("low_stock", "")):
             low = (
                 ProductVariant.objects.filter(product=OuterRef("pk"), deleted_at__isnull=True, is_active=True,

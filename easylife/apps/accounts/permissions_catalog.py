@@ -8,7 +8,6 @@ PERMISSIONS = {
     "products": ["view", "create", "update", "delete", "publish", "toggle_visibility",
                  "archive", "import", "export", "manage_prices", "manage_cost"],
     "categories": ["view", "manage"],
-    "brands": ["view", "manage"],
     "storefront": ["view", "manage"],  # About page, contact, location, social accounts
     "inventory": ["view", "adjust", "transfer", "stocktake", "view_cost", "manage_warehouses"],
     "orders": ["view", "create", "update", "confirm", "process", "ship", "deliver",
@@ -22,6 +21,7 @@ PERMISSIONS = {
     "reports": ["sales", "inventory", "financial", "export"],
     "users": ["view", "create", "update", "deactivate", "manage_roles", "manage_permissions"],
     "settings": ["view", "manage", "view_audit_log"],
+    "marketing": ["view", "send_newsletter"],
 }
 
 ALL_CODES = [f"{module}.{action}" for module, actions in PERMISSIONS.items() for action in actions]
@@ -57,9 +57,9 @@ ROLE_TEMPLATES = {
     },
     "store_manager": {
         "description": "Catalog management",
-        "permissions": [c for c in ALL_CODES if c.startswith(("products.", "categories.", "brands.", "storefront."))
+        "permissions": [c for c in ALL_CODES if c.startswith(("products.", "categories.", "storefront."))
                         and c != "products.manage_cost"]
-        + ["orders.view"],
+        + ["orders.view", "marketing.view", "marketing.send_newsletter"],
     },
 }
 

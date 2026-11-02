@@ -3235,3 +3235,37 @@ python manage.py seed_currencies                # ILS/USD/JOD (إن لم تُه�
 
 ### التخطيط مقابل الواقع
 ملف [04-api-spec.md](04-api-spec.md) يصف **الخطة** الكاملة للنظام (بما فيها وحدات لم تُبنَ بعد). هذا الملف يصف **ما هو موجود وشغّال فعلاً**.
+#### GET /admin/newsletter/
+
+Requires `marketing.send_newsletter`. Returns the number of active customer accounts that explicitly subscribed to WhatsApp newsletter messages.
+
+**Response `200`:** `{ "subscriber_count": 12 }`
+
+#### POST /admin/newsletter/
+
+Requires `marketing.send_newsletter`. Sends the supplied text to active customer accounts with an active newsletter subscription. Delivery failures are isolated per recipient and do not stop the remaining sends.
+
+**Request:** `{ "message": "..." }` (1–4000 characters)
+
+**Response `200`:** `{ "subscriber_count": 12, "sent": 11, "failed": 1 }`
+
+#### POST /admin/newsletter/subscribers/
+
+Requires `marketing.send_newsletter`. Subscribes an existing active customer to the newsletter (re-activates it if they had unsubscribed). Idempotent.
+
+**Request:** `{ "user": "<customer uuid>" }`
+
+**Response `201`** (new subscription) or **`200`** (already existed): `{ "user": "<uuid>", "subscribed": true, "subscribed_at": "2026-10-28T20:00:00Z" }`
+
+**Errors:** `400` invalid uuid · `404` unknown, inactive, or non-customer user.
+
+#### GET /account/newsletter/
+
+Returns the signed-in customer's current WhatsApp newsletter consent.
+
+**Response `200`:** `{ "subscribed": true, "subscribed_at": "2026-10-28T20:00:00Z" }`
+
+#### PATCH /account/newsletter/
+
+Updates the signed-in customer's consent. **Request:** `{ "subscribed": true }`.
+

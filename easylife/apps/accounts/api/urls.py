@@ -15,7 +15,13 @@ auth_patterns = [
     path("me", views.MeView.as_view()),
 ]
 
+account_patterns = [
+    path("newsletter/", views.NewsletterPreferenceView.as_view()),
+]
+
 admin_patterns = [
     path("roles", views.RoleListView.as_view()),
+    path("newsletter/", views.NewsletterAdminView.as_view()),
+    path("newsletter/subscribers/", views.NewsletterAdminSubscribeView.as_view()),
     path("", include(router.urls)),
 ]

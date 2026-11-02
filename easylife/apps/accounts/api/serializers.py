@@ -87,3 +87,22 @@ class CustomerCreateSerializer(serializers.Serializer):
 
 class PromoteSerializer(serializers.Serializer):
     role_ids = serializers.ListField(child=serializers.IntegerField(), required=False, default=list)
+
+
+class NewsletterPreferenceSerializer(serializers.Serializer):
+    subscribed = serializers.BooleanField()
+
+
+class NewsletterSubscribeUserSerializer(serializers.Serializer):
+    user = serializers.UUIDField()
+
+
+class NewsletterImageSerializer(serializers.Serializer):
+    mimetype = serializers.ChoiceField(choices=["image/jpeg", "image/png", "image/webp"])
+    base64 = serializers.CharField(max_length=8_500_000)
+    filename = serializers.CharField(max_length=180, required=False, allow_blank=True, default="newsletter-image")
+
+
+class NewsletterSendSerializer(serializers.Serializer):
+    message = serializers.CharField(max_length=4000, allow_blank=False, trim_whitespace=True)
+    image = NewsletterImageSerializer(required=False, allow_null=True)

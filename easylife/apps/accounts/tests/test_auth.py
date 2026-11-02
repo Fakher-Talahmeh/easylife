@@ -340,3 +340,88 @@ def test_invalid_token_uses_the_standard_error_shape(api):
     r = api.get(AUTH + "me")
     assert r.status_code == 401
     assert r.data == {"code": "token_not_valid", "detail": "Token is invalid or expired."}
+
+
+def test_customer_can_subscribe_and_unsubscribe_from_newsletter():
+    customer = make_customer()
+    client = client_for(customer)
+    url = "/api/v1/account/newsletter/"
+
+    assert client.get(url).data["subscribed"] is False
+    assert client.patch(url, {"subscribed": True}, format="json").data["subscribed"] is True
+    assert client.patch(url, {"subscribed": False}, format="json").data["subscribed"] is False
+
+
+def test_newsletter_sends_only_to_active_subscribers(admin_client):
+    subscribed = make_customer()
+    inactive = User.objects.create_customer(new_phone(), full_name="Inactive", is_active=False)
+    other = make_customer()
+    from apps.accounts.models import NewsletterSubscription
+    NewsletterSubscription.objects.create(user=subscribed)
+    NewsletterSubscription.objects.create(user=inactive)
+    NewsletterSubscription.objects.create(user=other, unsubscribed_at="2026-01-01T00:00:00Z")
+
+    assert admin_client.get("/api/v1/admin/newsletter/").data == {"subscriber_count": 1}
+    response = admin_client.post(
+        "/api/v1/admin/newsletter/", {"message": "عرض جديد"}, format="json"
+    )
+    assert response.status_code == 200
+    assert response.data == {"subscriber_count": 1, "sent": 1, "failed": 0}
+    assert whatsapp.outbox[-1] == {"phone": subscribed.phone, "text": "عرض جديد"}
+
+
+def test_newsletter_requires_marketing_permission():
+    staff = client_for(staff_with(roles=["sales"]))
+    assert staff.get("/api/v1/admin/newsletter/").status_code == 403
+    assert staff.post("/api/v1/admin/newsletter/subscribers/", {}, format="json").status_code == 403
+
+
+def test_admin_can_subscribe_a_customer_to_newsletter(admin_client):
+    customer = make_customer()
+    url = "/api/v1/admin/newsletter/subscribers/"
+    body = {"user": str(customer.uuid)}
+
+    assert admin_client.post(url, body, format="json").status_code == 201
+    assert admin_client.post(url, body, format="json").status_code == 200
+    assert admin_client.get("/api/v1/admin/newsletter/").data == {"subscriber_count": 1}
+
+    from apps.accounts.models import NewsletterSubscription
+    NewsletterSubscription.objects.filter(user=customer).update(unsubscribed_at="2026-01-01T00:00:00Z")
+    assert admin_client.post(url, body, format="json").status_code == 200
+    assert admin_client.get("/api/v1/admin/newsletter/").data == {"subscriber_count": 1}
+
+    staff = staff_with(roles=["sales"])
+    assert admin_client.post(url, {"user": str(staff.uuid)}, format="json").status_code == 404
+
+
+def test_newsletter_can_send_an_image_with_caption(admin_client):
+    subscribed = make_customer()
+    from apps.accounts.models import NewsletterSubscription
+    NewsletterSubscription.objects.create(user=subscribed)
+
+    response = admin_client.post(
+        "/api/v1/admin/newsletter/",
+        {
+            "message": "عرض مع صورة",
+            "image": {
+                "mimetype": "image/png",
+                "base64": "iVBORw0KGgo=",
+                "filename": "offer.png",
+            },
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert response.data == {"subscriber_count": 1, "sent": 1, "failed": 0}
+    assert whatsapp.outbox[-1] == {
+        "phone": subscribed.phone,
+        "caption": "عرض مع صورة",
+        "images": [{
+            "mimetype": "image/png",
+            "base64": "iVBORw0KGgo=",
+            "filename": "offer.png",
+            "caption": "عرض مع صورة",
+        }],
+        "type": "images",
+    }

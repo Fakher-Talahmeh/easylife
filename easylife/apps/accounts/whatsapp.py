@@ -41,7 +41,8 @@ def send_text(phone, text):
         outbox.append({"phone": phone, "text": text})
         return
     if backend == "console":
-        print(f"[WhatsApp -> {phone}] {text}")  # noqa: T201 (dev only)
+        # Keep the development backend side-effect free with respect to logs. Phone
+        # numbers and OTP contents are sensitive and must never be written to stdout.
         return
     if not settings.WHATSAPP_API_KEY:
         raise WhatsAppDeliveryError("WHATSAPP_API_KEY is not configured")
@@ -52,10 +53,34 @@ def send_text(phone, text):
             headers={"x-eksir-user-api-key": settings.WHATSAPP_API_KEY},
             timeout=settings.WHATSAPP_TIMEOUT_SECONDS,
         )
-        print(f"{phone}@c.us")
     except requests.RequestException as exc:
         logger.warning("WhatsApp request failed: %s", type(exc).__name__)
         raise WhatsAppDeliveryError("request failed") from exc
     if resp.status_code >= 300:
         logger.warning("WhatsApp API returned HTTP %s", resp.status_code)
+        raise WhatsAppDeliveryError(f"HTTP {resp.status_code}")
+
+
+def send_images_batch(phone, images, caption=""):
+    """Send one or more image payloads through the Eksir image endpoint."""
+    backend = settings.WHATSAPP_BACKEND
+    if backend == "locmem":
+        outbox.append({"phone": phone, "caption": caption, "images": images, "type": "images"})
+        return
+    if backend == "console":
+        return
+    if not settings.WHATSAPP_API_KEY:
+        raise WhatsAppDeliveryError("WHATSAPP_API_KEY is not configured")
+    try:
+        resp = requests.post(
+            settings.WHATSAPP_IMAGES_API_URL,
+            json={"to": f"{phone}@c.us", "caption": caption, "images": images},
+            headers={"x-eksir-user-api-key": settings.WHATSAPP_API_KEY},
+            timeout=settings.WHATSAPP_TIMEOUT_SECONDS,
+        )
+    except requests.RequestException as exc:
+        logger.warning("WhatsApp image request failed: %s", type(exc).__name__)
+        raise WhatsAppDeliveryError("request failed") from exc
+    if resp.status_code >= 300:
+        logger.warning("WhatsApp image API returned HTTP %s", resp.status_code)
         raise WhatsAppDeliveryError(f"HTTP {resp.status_code}")
